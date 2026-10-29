@@ -1,5 +1,5 @@
 
-name: Generate Day 1 AI Script and Voice
+name: Generate Day 1 AI Script, Voice and Shorts Video
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
 jobs:
   generate-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -21,7 +21,10 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            git cmake build-essential curl python3 python3-venv
+            git cmake build-essential curl python3 python3-venv \
+            ffmpeg fonts-dejavu-core
+
+          ffmpeg -version
 
       - name: Download Qwen model
         timeout-minutes: 8
@@ -204,7 +207,6 @@ jobs:
           if not content:
               raise SystemExit("ERROR: Model returned empty narration.")
 
-          # Remove common Markdown formatting.
           content = re.sub(r"\*\*(.*?)\*\*", r"\1", content)
           content = re.sub(r"__(.*?)__", r"\1", content)
           content = re.sub(r"(?m)^\s*#{1,6}\s*", "", content)
@@ -246,7 +248,9 @@ jobs:
           content = re.sub(r"\s+", " ", " ".join(lines)).strip()
 
           if not content:
-              raise SystemExit("ERROR: No narration remained after cleanup.")
+              raise SystemExit(
+                  "ERROR: No narration remained after cleanup."
+              )
 
           Path("output/script.txt").write_text(
               content + "\n",
@@ -348,7 +352,132 @@ jobs:
           print(f"File size: {audio.stat().st_size} bytes")
           PY
 
-      - name: Upload script, voice, and diagnostics
+      - name: Generate timed captions
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import wave
+
+          script = Path("output/script.txt").read_text(
+              encoding="utf-8"
+          ).strip()
+
+          audio_path = Path("output/day-001.wav")
+          srt_path = Path("output/day-001.srt")
+
+          if not script or not audio_path.exists():
+              raise SystemExit("Script or audio file is missing.")
+
+          with wave.open(str(audio_path), "rb") as audio:
+              duration = audio.getnframes() / audio.getframerate()
+
+          words = re.findall(r"\S+", script)
+
+          if not words or duration <= 0:
+              raise SystemExit("Invalid script or audio duration.")
+
+          chunks = [
+              words[i:i + 6]
+              for i in range(0, len(words), 6)
+          ]
+
+          weights = [
+              sum(len(word) for word in chunk)
+              for chunk in chunks
+          ]
+          total_weight = sum(weights)
+          elapsed = 0.0
+          entries = []
+
+          def timestamp(seconds):
+              ms = round(seconds * 1000)
+              hours, ms = divmod(ms, 3600000)
+              minutes, ms = divmod(ms, 60000)
+              seconds, ms = divmod(ms, 1000)
+              return (
+                  f"{hours:02}:{minutes:02}:"
+                  f"{seconds:02},{ms:03}"
+              )
+
+          for index, (chunk, weight) in enumerate(
+              zip(chunks, weights), start=1
+          ):
+              start = elapsed
+              elapsed += duration * weight / total_weight
+
+              entries.append(
+                  f"{index}\n"
+                  f"{timestamp(start)} --> {timestamp(elapsed)}\n"
+                  f"{' '.join(chunk)}\n"
+              )
+
+          srt_path.write_text(
+              "\n".join(entries),
+              encoding="utf-8"
+          )
+
+          print(f"Created {len(chunks)} caption segments.")
+          print(f"Audio duration: {duration:.1f} seconds")
+          print(f"Captions saved to: {srt_path}")
+          PY
+
+          test -s output/day-001.srt
+
+      - name: Render YouTube Shorts MP4
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+
+          test -s output/script.txt
+          test -s output/day-001.wav
+          test -s output/day-001.srt
+
+          ffmpeg -y \
+            -f lavfi \
+            -i "color=c=0x101827:s=1080x1920:r=30" \
+            -i output/day-001.wav \
+            -filter_complex "\
+              [0:v]drawbox=x=0:y=0:w=iw:h=18:color=0x38BDF8:t=fill,\
+              drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:\
+              text='90-DAY SOFTWARE JOURNEY':\
+              fontsize=46:fontcolor=0x38BDF8:\
+              x=(w-text_w)/2:y=210,\
+              drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:\
+              text='DAY 01  |  BUILDING IN PUBLIC':\
+              fontsize=30:fontcolor=white:\
+              x=(w-text_w)/2:y=290,\
+              subtitles=output/day-001.srt:\
+              force_style='FontName=DejaVu Sans,FontSize=22,\
+              PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,\
+              BorderStyle=1,Outline=3,Shadow=1,\
+              Alignment=2,MarginV=430'\
+              [v]" \
+            -map "[v]" \
+            -map 1:a \
+            -c:v libx264 \
+            -preset veryfast \
+            -crf 23 \
+            -pix_fmt yuv420p \
+            -c:a aac \
+            -b:a 128k \
+            -shortest \
+            -movflags +faststart \
+            output/day-001.mp4
+
+          test -s output/day-001.mp4
+
+          ffprobe -v error \
+            -show_entries stream=codec_name,width,height \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1 \
+            output/day-001.mp4
+
+          echo "Day 1 vertical video rendered successfully."
+
+      - name: Upload script, voice, video, and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -356,6 +485,8 @@ jobs:
           path: |
             output/script.txt
             output/day-001.wav
+            output/day-001.srt
+            output/day-001.mp4
             output/llama.log
             output/response.json
           if-no-files-found: warn
