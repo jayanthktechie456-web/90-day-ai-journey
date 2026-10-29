@@ -1,5 +1,5 @@
 
-name: Generate Day 1 AI Script
+name: Generate Day 1 AI Script and Voice
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
 jobs:
   generate-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - name: Checkout repository
@@ -20,17 +20,20 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y git cmake build-essential curl python3
+          sudo apt-get install -y \
+            git cmake build-essential curl python3 python3-venv
 
       - name: Download Qwen model
         timeout-minutes: 8
         run: |
           set -euo pipefail
+
           mkdir -p models
           MODEL="models/qwen.gguf"
           MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true"
 
-          curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 \
+          curl -fL --retry 3 --retry-delay 2 \
+            --connect-timeout 30 \
             "$MODEL_URL" -o "$MODEL"
 
           test -s "$MODEL"
@@ -57,7 +60,7 @@ jobs:
           LLAMA_SERVER="$GITHUB_WORKSPACE/llama.cpp/build/bin/llama-server"
 
           if [ ! -x "$LLAMA_SERVER" ]; then
-            echo "::error::llama-server was not produced at the expected path."
+            echo "::error::llama-server was not produced."
             find llama.cpp/build -type f -name 'llama-server*' -print || true
             exit 1
           fi
@@ -83,19 +86,16 @@ jobs:
 
           system_prompt = (
               "Write a natural, first-person English YouTube Shorts "
-              "voice-over script lasting about 45-60 seconds. "
-              "Output ONLY the exact words a person should speak. "
-              "Do not include a title, heading, markdown, asterisks, "
-              "bullets, scene descriptions, camera directions, "
-              "labels such as Narrator, or stage directions. "
-              "Start directly with the spoken hook. "
+              "voice-over script for approximately 45-60 seconds. "
+              "Return only the words to be spoken. Do not include "
+              "titles, headings, markdown, bullets, scene descriptions, "
+              "camera directions, speaker labels, or stage directions. "
+              "Start with a compelling but honest spoken hook. "
               "Mention Day 1 of a 90-day transformation, DSA, Java, "
               "Java 8, Spring Boot, microservices, system design, "
-              "AI automation, and the goal of building a second "
-              "source of income. "
-              "Use simple, natural spoken English and a realistic "
-              "motivational tone. Do not invent achievements. "
-              "Write 100-130 words of spoken narration only."
+              "AI automation, and the goal of building a second source "
+              "of income. Use simple, natural spoken English. "
+              "Do not invent achievements. Aim for 100-130 words."
           )
 
           payload = {
@@ -107,7 +107,7 @@ jobs:
                   {
                       "role": "user",
                       "content": (
-                          "Write the spoken narration using this "
+                          "Create the spoken narration from this "
                           "journal entry:\n\n" + journal
                       )
                   }
@@ -172,7 +172,7 @@ jobs:
           done
 
           if [ "$READY" -ne 1 ]; then
-            echo "::error::llama-server did not become ready in time."
+            echo "::error::llama-server did not become ready."
             cat output/llama.log || true
             exit 1
           fi
@@ -183,7 +183,7 @@ jobs:
             -H "Content-Type: application/json" \
             --data-binary @output/request.json \
             -o output/response.json; then
-            echo "::error::The model generation HTTP request failed."
+            echo "::error::Narration generation request failed."
             cat output/llama.log || true
             exit 1
           fi
@@ -207,11 +207,9 @@ jobs:
           # Remove common Markdown formatting.
           content = re.sub(r"\*\*(.*?)\*\*", r"\1", content)
           content = re.sub(r"__(.*?)__", r"\1", content)
-          content = re.sub(r"(?<!\*)\*(?!\s)(.*?)(?<!\s)\*(?!\*)", r"\1", content)
           content = re.sub(r"(?m)^\s*#{1,6}\s*", "", content)
 
-          # Remove common non-spoken headings and stage directions.
-          unwanted_lines = re.compile(
+          unwanted = re.compile(
               r"^\s*(?:"
               r"narration script|"
               r"opening shot\b.*|"
@@ -220,40 +218,32 @@ jobs:
               r"camera direction\b.*|"
               r"realistic motivational tone|"
               r"long-term goal|"
-              r"day 1\s*[-—:]\s*my 90-day transformation|"
-              r"narrator\s*\(voice[- ]over\)\s*:.*"
+              r"day 1\s*[-—:]\s*my 90-day transformation"
               r")\s*$",
               re.IGNORECASE
           )
 
-          cleaned_lines = []
+          lines = []
 
           for line in content.splitlines():
               line = line.strip()
 
-              if not line:
+              if not line or unwanted.match(line):
                   continue
 
-              if unwanted_lines.match(line):
-                  continue
-
-              # Remove a speaker label if it precedes spoken words.
+              line = re.sub(r"^\s*>\s?", "", line)
               line = re.sub(
                   r"^Narrator\s*\(Voice[- ]over\)\s*:\s*",
                   "",
                   line,
                   flags=re.IGNORECASE
               )
-
-              # Remove leading/trailing Markdown quote markers.
-              line = re.sub(r"^\s*>\s?", "", line)
-              line = re.sub(r"\s*[*_]{1,2}\s*$", "", line)
+              line = re.sub(r"[*_]{1,2}", "", line).strip()
 
               if line:
-                  cleaned_lines.append(line)
+                  lines.append(line)
 
-          content = " ".join(cleaned_lines)
-          content = re.sub(r"\s+", " ", content).strip()
+          content = re.sub(r"\s+", " ", " ".join(lines)).strip()
 
           if not content:
               raise SystemExit("ERROR: No narration remained after cleanup.")
@@ -287,20 +277,85 @@ jobs:
           if grep -Eqi \
             'available commands:|Loading model|JOURNAL ENTRY:|Opening shot:|Closing shot:|Scene description:|Camera direction:|Narration Script|Narrator \(Voice-over\):' \
             output/script.txt; then
-            echo "::error::Output contains headings or directions, not just narration."
+            echo "::error::Script contains unwanted headings or directions."
             cat output/script.txt
             exit 1
           fi
 
           echo "Script passed basic validation."
 
-      - name: Upload script and diagnostics
+      - name: Install Piper TTS
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+
+          python3 -m venv .venv-tts
+
+          .venv-tts/bin/python -m pip install --upgrade pip
+          .venv-tts/bin/python -m pip install piper-tts
+
+          echo "Piper TTS installed successfully."
+
+      - name: Download Piper voice
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+
+          mkdir -p voices
+
+          .venv-tts/bin/python -m piper.download_voices \
+            en_US-lessac-medium \
+            --download-dir voices
+
+          test -s voices/en_US-lessac-medium.onnx
+          test -s voices/en_US-lessac-medium.onnx.json
+
+          echo "Piper voice model downloaded successfully."
+
+      - name: Generate Day 1 voice narration
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s output/script.txt
+
+          .venv-tts/bin/piper \
+            --model voices/en_US-lessac-medium.onnx \
+            --output_file output/day-001.wav \
+            < output/script.txt
+
+          test -s output/day-001.wav
+
+          python3 - <<'PY'
+          import wave
+          from pathlib import Path
+
+          audio = Path("output/day-001.wav")
+
+          with wave.open(str(audio), "rb") as wav:
+              duration = wav.getnframes() / wav.getframerate()
+              sample_rate = wav.getframerate()
+              channels = wav.getnchannels()
+
+          if duration <= 0:
+              raise SystemExit("ERROR: Generated audio is empty.")
+
+          print("Voice narration generated successfully.")
+          print(f"Duration: {duration:.1f} seconds")
+          print(f"Sample rate: {sample_rate} Hz")
+          print(f"Channels: {channels}")
+          print(f"File size: {audio.stat().st_size} bytes")
+          PY
+
+      - name: Upload script, voice, and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: day-001-ai-script
           path: |
             output/script.txt
+            output/day-001.wav
             output/llama.log
             output/response.json
           if-no-files-found: warn
