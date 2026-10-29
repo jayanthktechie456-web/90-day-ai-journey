@@ -1,0 +1,181 @@
+name: Generate Day 1 AI Script
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate-script:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y git cmake build-essential curl python3
+
+      - name: Download Qwen model
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          MODEL="models/qwen.gguf"
+          MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true"
+          curl -fL --retry 3 --connect-timeout 30 "$MODEL_URL" -o "$MODEL"
+          test -s "$MODEL"
+          ls -lh "$MODEL"
+
+      - name: Build llama-server
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp
+          cmake -S llama.cpp -B llama.cpp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DGGML_OPENMP=ON
+          cmake --build llama.cpp/build --config Release --target llama-server -j 2
+
+          LLAMA_SERVER="$GITHUB_WORKSPACE/llama.cpp/build/bin/llama-server"
+          if [ ! -x "$LLAMA_SERVER" ]; then
+            echo "::error::llama-server was not produced at the expected path."
+            find llama.cpp/build -type f -name 'llama-server*' -print || true
+            exit 1
+          fi
+          echo "LLAMA_SERVER=$LLAMA_SERVER" >> "$GITHUB_ENV"
+          echo "llama-server built successfully: $LLAMA_SERVER"
+          "$LLAMA_SERVER" --version
+
+      - name: Prepare prompt
+        run: |
+          set -euo pipefail
+          test -s daily_notes/day-001.md
+          mkdir -p output
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          journal = Path("daily_notes/day-001.md").read_text(encoding="utf-8")
+          payload = {
+              "messages": [
+                  {
+                      "role": "system",
+                      "content": (
+                          "Write a natural English YouTube Shorts voice-over script for 45-60 seconds. "
+                          "Return only spoken narration: no title, headings, bullets, or stage directions. "
+                          "Use simple spoken English, an honest hook, and a realistic motivational tone. "
+                          "Mention Day 1 and the 90-day transformation; include DSA, Java, Java 8, "
+                          "Spring Boot, microservices, system design, AI automation, and the goal of "
+                          "building a second source of income. Do not invent achievements. Aim for 100-130 words."
+                      )
+                  },
+                  {
+                      "role": "user",
+                      "content": "Write the narration based on this journal entry:\n\n" + journal
+                  }
+              ],
+              "temperature": 0.7,
+              "max_tokens": 220,
+              "stream": False
+          }
+          Path("output/request.json").write_text(json.dumps(payload), encoding="utf-8")
+          print("Prompt request prepared.")
+          PY
+
+      - name: Generate narration using HTTP API
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          : > output/llama.log
+          SERVER="$LLAMA_SERVER"
+          MODEL="models/qwen.gguf"
+          test -x "$SERVER"
+          test -s "$MODEL"
+
+          "$SERVER" \
+            --model "$MODEL" \
+            --host 127.0.0.1 \
+            --port 8080 \
+            --ctx-size 4096 \
+            --threads 2 \
+            > output/llama.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+
+          READY=0
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null; then
+              READY=1
+              break
+            fi
+            sleep 4
+          done
+          if [ "$READY" -ne 1 ]; then
+            echo "::error::llama-server did not become ready."
+            cat output/llama.log || true
+            exit 1
+          fi
+
+          if ! curl --fail --silent --show-error --max-time 300 \
+            http://127.0.0.1:8080/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            --data-binary @output/request.json \
+            -o output/response.json; then
+            echo "::error::The model generation HTTP request failed."
+            cat output/llama.log || true
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          response = json.loads(Path("output/response.json").read_text(encoding="utf-8"))
+          content = response["choices"][0]["message"]["content"].strip()
+          if not content:
+              raise SystemExit("ERROR: Model returned an empty narration.")
+          Path("output/script.txt").write_text(content + "\n", encoding="utf-8")
+          print("\n--- GENERATED SCRIPT ---\n")
+          print(content)
+          print("\n--- END SCRIPT ---")
+          print(f"Word count: {len(content.split())}")
+          PY
+
+      - name: Validate generated script
+        run: |
+          set -euo pipefail
+          test -s output/script.txt
+          WORDS="$(wc -w < output/script.txt | tr -d ' ')"
+          echo "Word count: $WORDS"
+          if [ "$WORDS" -lt 70 ] || [ "$WORDS" -gt 170 ]; then
+            echo "::error::Script must contain 70-170 words."
+            cat output/script.txt
+            exit 1
+          fi
+          if grep -Eqi 'available commands:|Loading model|JOURNAL ENTRY:|professional YouTube Shorts script writer' output/script.txt; then
+            echo "::error::Output contains prompt or CLI text rather than narration."
+            cat output/script.txt
+            exit 1
+          fi
+          echo "Script passed basic validation."
+
+      - name: Upload script and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: day-001-ai-script
+          path: |
+            output/script.txt
+            output/llama.log
+            output/response.json
+          if-no-files-found: warn
+          retention-days: 7
