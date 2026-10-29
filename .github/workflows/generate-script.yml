@@ -1,3 +1,4 @@
+
 name: Generate Day 1 AI Script
 
 on:
@@ -28,7 +29,10 @@ jobs:
           mkdir -p models
           MODEL="models/qwen.gguf"
           MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true"
-          curl -fL --retry 3 --connect-timeout 30 "$MODEL_URL" -o "$MODEL"
+
+          curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 \
+            "$MODEL_URL" -o "$MODEL"
+
           test -s "$MODEL"
           ls -lh "$MODEL"
 
@@ -36,56 +40,88 @@ jobs:
         timeout-minutes: 12
         run: |
           set -euo pipefail
-          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp
+
+          git clone --depth 1 \
+            https://github.com/ggml-org/llama.cpp.git llama.cpp
+
           cmake -S llama.cpp -B llama.cpp/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DGGML_NATIVE=OFF \
             -DGGML_OPENMP=ON
-          cmake --build llama.cpp/build --config Release --target llama-server -j 2
+
+          cmake --build llama.cpp/build \
+            --config Release \
+            --target llama-server \
+            -j 2
 
           LLAMA_SERVER="$GITHUB_WORKSPACE/llama.cpp/build/bin/llama-server"
+
           if [ ! -x "$LLAMA_SERVER" ]; then
             echo "::error::llama-server was not produced at the expected path."
             find llama.cpp/build -type f -name 'llama-server*' -print || true
             exit 1
           fi
+
           echo "LLAMA_SERVER=$LLAMA_SERVER" >> "$GITHUB_ENV"
-          echo "llama-server built successfully: $LLAMA_SERVER"
+          echo "llama-server built successfully."
           "$LLAMA_SERVER" --version
 
       - name: Prepare prompt
         run: |
           set -euo pipefail
+
           test -s daily_notes/day-001.md
           mkdir -p output
+
           python3 - <<'PY'
           from pathlib import Path
           import json
 
-          journal = Path("daily_notes/day-001.md").read_text(encoding="utf-8")
+          journal = Path("daily_notes/day-001.md").read_text(
+              encoding="utf-8"
+          )
+
+          system_prompt = (
+              "Write a natural, first-person English YouTube Shorts "
+              "voice-over script lasting about 45-60 seconds. "
+              "Output ONLY the exact words a person should speak. "
+              "Do not include a title, heading, markdown, asterisks, "
+              "bullets, scene descriptions, camera directions, "
+              "labels such as Narrator, or stage directions. "
+              "Start directly with the spoken hook. "
+              "Mention Day 1 of a 90-day transformation, DSA, Java, "
+              "Java 8, Spring Boot, microservices, system design, "
+              "AI automation, and the goal of building a second "
+              "source of income. "
+              "Use simple, natural spoken English and a realistic "
+              "motivational tone. Do not invent achievements. "
+              "Write 100-130 words of spoken narration only."
+          )
+
           payload = {
               "messages": [
                   {
                       "role": "system",
-                      "content": (
-                          "Write a natural English YouTube Shorts voice-over script for 45-60 seconds. "
-                          "Return only spoken narration: no title, headings, bullets, or stage directions. "
-                          "Use simple spoken English, an honest hook, and a realistic motivational tone. "
-                          "Mention Day 1 and the 90-day transformation; include DSA, Java, Java 8, "
-                          "Spring Boot, microservices, system design, AI automation, and the goal of "
-                          "building a second source of income. Do not invent achievements. Aim for 100-130 words."
-                      )
+                      "content": system_prompt
                   },
                   {
                       "role": "user",
-                      "content": "Write the narration based on this journal entry:\n\n" + journal
+                      "content": (
+                          "Write the spoken narration using this "
+                          "journal entry:\n\n" + journal
+                      )
                   }
               ],
-              "temperature": 0.7,
+              "temperature": 0.5,
               "max_tokens": 220,
               "stream": False
           }
-          Path("output/request.json").write_text(json.dumps(payload), encoding="utf-8")
+
+          Path("output/request.json").write_text(
+              json.dumps(payload),
+              encoding="utf-8"
+          )
+
           print("Prompt request prepared.")
           PY
 
@@ -94,10 +130,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p output
           : > output/llama.log
+
           SERVER="$LLAMA_SERVER"
           MODEL="models/qwen.gguf"
+
           test -x "$SERVER"
           test -s "$MODEL"
 
@@ -108,24 +147,38 @@ jobs:
             --ctx-size 4096 \
             --threads 2 \
             > output/llama.log 2>&1 &
+
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
           READY=0
+
           for i in $(seq 1 90); do
-            if curl -fsS http://127.0.0.1:8080/health >/dev/null; then
+            if curl -fsS \
+              http://127.0.0.1:8080/health \
+              >/dev/null 2>&1; then
               READY=1
+              echo "llama-server is ready."
               break
             fi
+
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              echo "::error::llama-server exited during startup."
+              cat output/llama.log || true
+              exit 1
+            fi
+
             sleep 4
           done
+
           if [ "$READY" -ne 1 ]; then
-            echo "::error::llama-server did not become ready."
+            echo "::error::llama-server did not become ready in time."
             cat output/llama.log || true
             exit 1
           fi
 
-          if ! curl --fail --silent --show-error --max-time 300 \
+          if ! curl --fail --silent --show-error \
+            --max-time 300 \
             http://127.0.0.1:8080/v1/chat/completions \
             -H "Content-Type: application/json" \
             --data-binary @output/request.json \
@@ -137,13 +190,79 @@ jobs:
 
           python3 - <<'PY'
           import json
+          import re
           from pathlib import Path
 
-          response = json.loads(Path("output/response.json").read_text(encoding="utf-8"))
+          response = json.loads(
+              Path("output/response.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+
           content = response["choices"][0]["message"]["content"].strip()
+
           if not content:
-              raise SystemExit("ERROR: Model returned an empty narration.")
-          Path("output/script.txt").write_text(content + "\n", encoding="utf-8")
+              raise SystemExit("ERROR: Model returned empty narration.")
+
+          # Remove common Markdown formatting.
+          content = re.sub(r"\*\*(.*?)\*\*", r"\1", content)
+          content = re.sub(r"__(.*?)__", r"\1", content)
+          content = re.sub(r"(?<!\*)\*(?!\s)(.*?)(?<!\s)\*(?!\*)", r"\1", content)
+          content = re.sub(r"(?m)^\s*#{1,6}\s*", "", content)
+
+          # Remove common non-spoken headings and stage directions.
+          unwanted_lines = re.compile(
+              r"^\s*(?:"
+              r"narration script|"
+              r"opening shot\b.*|"
+              r"closing shot\b.*|"
+              r"scene description\b.*|"
+              r"camera direction\b.*|"
+              r"realistic motivational tone|"
+              r"long-term goal|"
+              r"day 1\s*[-—:]\s*my 90-day transformation|"
+              r"narrator\s*\(voice[- ]over\)\s*:.*"
+              r")\s*$",
+              re.IGNORECASE
+          )
+
+          cleaned_lines = []
+
+          for line in content.splitlines():
+              line = line.strip()
+
+              if not line:
+                  continue
+
+              if unwanted_lines.match(line):
+                  continue
+
+              # Remove a speaker label if it precedes spoken words.
+              line = re.sub(
+                  r"^Narrator\s*\(Voice[- ]over\)\s*:\s*",
+                  "",
+                  line,
+                  flags=re.IGNORECASE
+              )
+
+              # Remove leading/trailing Markdown quote markers.
+              line = re.sub(r"^\s*>\s?", "", line)
+              line = re.sub(r"\s*[*_]{1,2}\s*$", "", line)
+
+              if line:
+                  cleaned_lines.append(line)
+
+          content = " ".join(cleaned_lines)
+          content = re.sub(r"\s+", " ", content).strip()
+
+          if not content:
+              raise SystemExit("ERROR: No narration remained after cleanup.")
+
+          Path("output/script.txt").write_text(
+              content + "\n",
+              encoding="utf-8"
+          )
+
           print("\n--- GENERATED SCRIPT ---\n")
           print(content)
           print("\n--- END SCRIPT ---")
@@ -153,19 +272,26 @@ jobs:
       - name: Validate generated script
         run: |
           set -euo pipefail
+
           test -s output/script.txt
+
           WORDS="$(wc -w < output/script.txt | tr -d ' ')"
           echo "Word count: $WORDS"
+
           if [ "$WORDS" -lt 70 ] || [ "$WORDS" -gt 170 ]; then
             echo "::error::Script must contain 70-170 words."
             cat output/script.txt
             exit 1
           fi
-          if grep -Eqi 'available commands:|Loading model|JOURNAL ENTRY:|professional YouTube Shorts script writer' output/script.txt; then
-            echo "::error::Output contains prompt or CLI text rather than narration."
+
+          if grep -Eqi \
+            'available commands:|Loading model|JOURNAL ENTRY:|Opening shot:|Closing shot:|Scene description:|Camera direction:|Narration Script|Narrator \(Voice-over\):' \
+            output/script.txt; then
+            echo "::error::Output contains headings or directions, not just narration."
             cat output/script.txt
             exit 1
           fi
+
           echo "Script passed basic validation."
 
       - name: Upload script and diagnostics
