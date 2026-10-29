@@ -19,6 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           set -euo pipefail
+
           sudo apt-get update
           sudo apt-get install -y \
             git cmake build-essential curl python3 python3-venv \
@@ -32,6 +33,7 @@ jobs:
           set -euo pipefail
 
           mkdir -p models
+
           MODEL="models/qwen.gguf"
           MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true"
 
@@ -69,6 +71,7 @@ jobs:
           fi
 
           echo "LLAMA_SERVER=$LLAMA_SERVER" >> "$GITHUB_ENV"
+
           echo "llama-server built successfully."
           "$LLAMA_SERVER" --version
 
@@ -87,19 +90,28 @@ jobs:
               encoding="utf-8"
           )
 
-          system_prompt = (
-              "Write a natural, first-person English YouTube Shorts "
-              "voice-over script for approximately 45-60 seconds. "
-              "Return only the words to be spoken. Do not include "
-              "titles, headings, markdown, bullets, scene descriptions, "
-              "camera directions, speaker labels, or stage directions. "
-              "Start with a compelling but honest spoken hook. "
-              "Mention Day 1 of a 90-day transformation, DSA, Java, "
-              "Java 8, Spring Boot, microservices, system design, "
-              "AI automation, and the goal of building a second source "
-              "of income. Use simple, natural spoken English. "
-              "Do not invent achievements. Aim for 100-130 words."
-          )
+          system_prompt = """
+          You write natural YouTube Shorts voice-over scripts.
+
+          Produce one short spoken narration in simple English.
+
+          Requirements:
+          - Target 100 to 120 words.
+          - Write in first person.
+          - Start with an interesting but honest hook.
+          - Mention Day 1 of my 90-day journey.
+          - Mention DSA, Java, Java 8, Spring Boot,
+            microservices, system design and AI automation.
+          - Mention my goal of building a second source of income.
+          - Sound like a real person speaking to the camera.
+          - Use one or two short paragraphs.
+          - Do not use headings, titles, bullets or numbered lists.
+          - Do not explain every technology separately.
+          - Do not repeat ideas or copy the journal verbatim.
+          - Do not invent achievements.
+          - Finish with a complete sentence.
+          - Return only the narration.
+          """
 
           payload = {
               "messages": [
@@ -110,13 +122,14 @@ jobs:
                   {
                       "role": "user",
                       "content": (
-                          "Create the spoken narration from this "
-                          "journal entry:\n\n" + journal
+                          "Summarize these notes into a concise "
+                          "spoken narration. Follow every requirement "
+                          "in the system prompt.\n\n" + journal
                       )
                   }
               ],
-              "temperature": 0.5,
-              "max_tokens": 220,
+              "temperature": 0.2,
+              "max_tokens": 160,
               "stream": False
           }
 
@@ -125,7 +138,7 @@ jobs:
               encoding="utf-8"
           )
 
-          print("Prompt request prepared.")
+          print("Concise narration prompt prepared.")
           PY
 
       - name: Generate narration using HTTP API
@@ -207,49 +220,66 @@ jobs:
           if not content:
               raise SystemExit("ERROR: Model returned empty narration.")
 
+          # Remove common Markdown formatting.
           content = re.sub(r"\*\*(.*?)\*\*", r"\1", content)
           content = re.sub(r"__(.*?)__", r"\1", content)
           content = re.sub(r"(?m)^\s*#{1,6}\s*", "", content)
 
-          unwanted = re.compile(
-              r"^\s*(?:"
-              r"narration script|"
-              r"opening shot\b.*|"
-              r"closing shot\b.*|"
-              r"scene description\b.*|"
-              r"camera direction\b.*|"
-              r"realistic motivational tone|"
-              r"long-term goal|"
-              r"day 1\s*[-—:]\s*my 90-day transformation"
-              r")\s*$",
-              re.IGNORECASE
+          # Remove a common introductory title if the model adds one.
+          content = re.sub(
+              r"^(?:Today's Journey Begins|"
+              r"My 90-Day Transformation|"
+              r"Narration Script)\s*[:—-]?\s*",
+              "",
+              content,
+              flags=re.IGNORECASE
           )
 
-          lines = []
+          # Remove speaker labels and stage directions.
+          content = re.sub(
+              r"(?im)^\s*Narrator\s*\(Voice[- ]over\)\s*:\s*",
+              "",
+              content
+          )
 
-          for line in content.splitlines():
-              line = line.strip()
+          content = re.sub(
+              r"(?im)^\s*(?:Opening shot|Closing shot|"
+              r"Scene description|Camera direction)\s*:.*$",
+              "",
+              content
+          )
 
-              if not line or unwanted.match(line):
-                  continue
+          # Remove Markdown list markers, including inline bullets.
+          content = re.sub(
+              r"(?<!\S)[-*+]\s+",
+              "",
+              content
+          )
 
-              line = re.sub(r"^\s*>\s?", "", line)
-              line = re.sub(
-                  r"^Narrator\s*\(Voice[- ]over\)\s*:\s*",
-                  "",
-                  line,
-                  flags=re.IGNORECASE
-              )
-              line = re.sub(r"[*_]{1,2}", "", line).strip()
-
-              if line:
-                  lines.append(line)
-
-          content = re.sub(r"\s+", " ", " ".join(lines)).strip()
+          content = re.sub(r"\s+", " ", content).strip()
 
           if not content:
+              raise SystemExit("ERROR: Narration is empty after cleanup.")
+
+          words = content.split()
+          word_count = len(words)
+
+          print("\n--- CLEANED GENERATED SCRIPT ---\n")
+          print(content)
+          print("\n--- END SCRIPT ---")
+          print(f"Word count: {word_count}")
+
+          if word_count < 70 or word_count > 170:
               raise SystemExit(
-                  "ERROR: No narration remained after cleanup."
+                  f"ERROR: Script has {word_count} words. "
+                  "Expected 70-170 words. "
+                  "Reduce the prompt length or adjust generation."
+              )
+
+          if content[-1] not in ".!?":
+              raise SystemExit(
+                  "ERROR: Script appears incomplete because it "
+                  "does not end with sentence punctuation."
               )
 
           Path("output/script.txt").write_text(
@@ -257,10 +287,7 @@ jobs:
               encoding="utf-8"
           )
 
-          print("\n--- GENERATED SCRIPT ---\n")
-          print(content)
-          print("\n--- END SCRIPT ---")
-          print(f"Word count: {len(content.split())}")
+          print("Clean narration saved successfully.")
           PY
 
       - name: Validate generated script
@@ -379,11 +406,13 @@ jobs:
           if not words or duration <= 0:
               raise SystemExit("Invalid script or audio duration.")
 
+          # Divide narration into readable groups of six words.
           chunks = [
               words[i:i + 6]
               for i in range(0, len(words), 6)
           ]
 
+          # Estimate caption timing from text length.
           weights = [
               sum(len(word) for word in chunk)
               for chunk in chunks
@@ -397,6 +426,7 @@ jobs:
               hours, ms = divmod(ms, 3600000)
               minutes, ms = divmod(ms, 60000)
               seconds, ms = divmod(ms, 1000)
+
               return (
                   f"{hours:02}:{minutes:02}:"
                   f"{seconds:02},{ms:03}"
