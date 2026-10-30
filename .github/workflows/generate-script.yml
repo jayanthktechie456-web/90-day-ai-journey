@@ -1,5 +1,5 @@
 
-name: Generate Day 1 AI Script, Voice and Shorts Video
+name: Generate Daily AI Script and YouTube Short
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  generate-script:
+  generate:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -16,471 +16,421 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install system dependencies
         run: |
-          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            git cmake build-essential curl python3 python3-venv \
-            ffmpeg fonts-dejavu-core
+            git \
+            cmake \
+            build-essential \
+            curl \
+            jq \
+            python3 \
+            python3-venv \
+            ffmpeg \
+            fonts-dejavu-core
 
-          ffmpeg -version
-
+      # ----------------------------------------------------
+      # 1. Download the Qwen model
+      # ----------------------------------------------------
       - name: Download Qwen model
-        timeout-minutes: 8
         run: |
-          set -euo pipefail
+          mkdir -p models output
 
-          mkdir -p models
+          curl -L --fail --retry 3 \
+            "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" \
+            -o models/qwen.gguf
 
-          MODEL="models/qwen.gguf"
-          MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true"
-          curl -fL --retry 3 --retry-delay 2 \
-            --connect-timeout 30 \
-            "$MODEL_URL" -o "$MODEL"
+          ls -lh models/qwen.gguf
 
-          test -s "$MODEL"
-          ls -lh "$MODEL"
-
-      - name: Build llama-server
-        timeout-minutes: 12
+      # ----------------------------------------------------
+      # 2. Build llama.cpp
+      # ----------------------------------------------------
+      - name: Build llama.cpp
         run: |
-          set -euo pipefail
-
-          git clone --depth 1 \
-            https://github.com/ggml-org/llama.cpp.git llama.cpp
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git
           cmake -S llama.cpp -B llama.cpp/build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DGGML_NATIVE=OFF \
-            -DGGML_OPENMP=ON
+            -DGGML_NATIVE=OFF
 
           cmake --build llama.cpp/build \
             --config Release \
             --target llama-server \
             -j 2
 
-          LLAMA_SERVER="$GITHUB_WORKSPACE/llama.cpp/build/bin/llama-server"
-          if [ ! -x "$LLAMA_SERVER" ]; then
-            echo "::error::llama-server was not produced."
-            find llama.cpp/build -type f -name 'llama-server*' -print || true
-            exit 1
-          fi
-
-          echo "LLAMA_SERVER=$LLAMA_SERVER" >> "$GITHUB_ENV"
-
-          echo "llama-server built successfully."
-          "$LLAMA_SERVER" --version
-
-      - name: Prepare prompt
+      # ----------------------------------------------------
+      # 3. Start Qwen server
+      # ----------------------------------------------------
+      - name: Start Qwen server
         run: |
           set -euo pipefail
 
-          test -s daily_notes/day-001.md
-          mkdir -p output
-          python3 - <<'PY'
-          from pathlib import Path
-          import json
-
-          journal = Path("daily_notes/day-001.md").read_text(
-              encoding="utf-8"
-          )
-
-          system_prompt = """
-          You write natural YouTube Shorts voice-over scripts.
-
-          Produce one short spoken narration in simple English.
-          Requirements:
-          - Target 100 to 120 words.
-          - Write in first person.
-          - Start with an interesting but honest hook.
-          - Mention Day 1 of my 90-day journey.
-          - Mention DSA, Java, Java 8, Spring Boot,
-            microservices, system design and AI automation.
-          - Mention my goal of building a second source of income.
-          - Sound like a real person speaking to the camera.
-          - Use one or two short paragraphs.
-          - Do not use headings, titles, bullets or numbered lists.
-          - Do not explain every technology separately.
-          - Do not repeat ideas or copy the journal verbatim.
-          - Do not invent achievements.
-          - Finish with a complete sentence.
-          - Return only the narration.
-          """
-          payload = {
-              "messages": [
-                  {
-                      "role": "system",
-                      "content": system_prompt
-                  },
-                  {
-                      "role": "user",
-                      "content": (
-                          "Summarize these notes into a concise "
-                          "spoken narration. Follow every requirement "
-                          "in the system prompt.\n\n" + journal
-                      )
-                  }
-              ],
-              "temperature": 0.2,
-              "max_tokens": 160,
-              "stream": False
-          }
-          Path("output/request.json").write_text(
-              json.dumps(payload),
-              encoding="utf-8"
-          )
-
-          print("Concise narration prompt prepared.")
-          PY
-
-      - name: Generate narration using HTTP API
-        timeout-minutes: 8
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p output
-          : > output/llama.log
-
-          SERVER="$LLAMA_SERVER"
-          MODEL="models/qwen.gguf"
-          test -x "$SERVER"
-          test -s "$MODEL"
-
-          "$SERVER" \
-            --model "$MODEL" \
+          ./llama.cpp/build/bin/llama-server \
+            --model models/qwen.gguf \
             --host 127.0.0.1 \
             --port 8080 \
             --ctx-size 4096 \
-            --threads 2 \
+            --n-gpu-layers 0 \
             > output/llama.log 2>&1 &
 
-          SERVER_PID=$!
-          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          echo $! > output/llama.pid
 
           READY=0
-          for i in $(seq 1 90); do
-            if curl -fsS \
-              http://127.0.0.1:8080/health \
-              >/dev/null 2>&1; then
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null; then
               READY=1
-              echo "llama-server is ready."
               break
             fi
-
-            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-              echo "::error::llama-server exited during startup."
-              cat output/llama.log || true
-              exit 1
-            fi
-
-            sleep 4
+            sleep 5
           done
+
           if [ "$READY" -ne 1 ]; then
-            echo "::error::llama-server did not become ready."
-            cat output/llama.log || true
+            cat output/llama.log
+            echo "Qwen server failed to start."
             exit 1
           fi
-          if ! curl --fail --silent --show-error \
-            --max-time 300 \
-            http://127.0.0.1:8080/v1/chat/completions \
-            -H "Content-Type: application/json" \
-            --data-binary @output/request.json \
-            -o output/response.json; then
-            echo "::error::Narration generation request failed."
-            cat output/llama.log || true
-            exit 1
-          fi
-          python3 - <<'PY'
-          import json
-          import re
-          from pathlib import Path
 
-          response = json.loads(
-              Path("output/response.json").read_text(
-                  encoding="utf-8"
-              )
-          )
+          echo "Qwen server is ready."
 
-          content = response["choices"][0]["message"]["content"].strip()
-
-          if not content:
-              raise SystemExit("ERROR: Model returned empty narration.")
-          # Remove common Markdown formatting.
-          content = re.sub(r"\*\*(.*?)\*\*", r"\1", content)
-          content = re.sub(r"__(.*?)__", r"\1", content)
-          content = re.sub(r"(?m)^\s*#{1,6}\s*", "", content)
-          # Remove a common introductory title if the model adds one.
-          content = re.sub(
-              r"^(?:Today's Journey Begins|"
-              r"My 90-Day Transformation|"
-              r"Narration Script)\s*[:—-]?\s*",
-              "",
-              content,
-              flags=re.IGNORECASE
-          )
-          # Remove speaker labels and stage directions.
-          content = re.sub(
-              r"(?im)^\s*Narrator\s*\(Voice[- ]over\)\s*:\s*",
-              "",
-              content
-          )
-
-          content = re.sub(
-              r"(?im)^\s*(?:Opening shot|Closing shot|"
-              r"Scene description|Camera direction)\s*:.*$",
-              "",
-              content
-          )
-          # Remove Markdown list markers, including inline bullets.
-          content = re.sub(
-              r"(?<!\S)[-*+]\s+",
-              "",
-              content
-          )
-
-          content = re.sub(r"\s+", " ", content).strip()
-
-          if not content:
-              raise SystemExit("ERROR: Narration is empty after cleanup.")
-
-          words = content.split()
-          word_count = len(words)
-          print("\n--- CLEANED GENERATED SCRIPT ---\n")
-          print(content)
-          print("\n--- END SCRIPT ---")
-          print(f"Word count: {word_count}")
-
-          if word_count < 70 or word_count > 170:
-              raise SystemExit(
-                  f"ERROR: Script has {word_count} words. "
-                  "Expected 70-170 words. "
-                  "Reduce the prompt length or adjust generation."
-              )
-          if content[-1] not in ".!?":
-              raise SystemExit(
-                  "ERROR: Script appears incomplete because it "
-                  "does not end with sentence punctuation."
-              )
-
-          Path("output/script.txt").write_text(
-              content + "\n",
-              encoding="utf-8"
-          )
-
-          print("Clean narration saved successfully.")
-          PY
-
-      - name: Validate generated script
+      # ----------------------------------------------------
+      # 4. Generate conversational narration
+      # ----------------------------------------------------
+      - name: Generate script with Qwen
         run: |
           set -euo pipefail
-          test -s output/script.txt
 
-          WORDS="$(wc -w < output/script.txt | tr -d ' ')"
-          echo "Word count: $WORDS"
+          cat > output/prompt.txt <<'PROMPT'
+          You are a friendly elder sister explaining technology to her
+          younger brother.
 
-          if [ "$WORDS" -lt 70 ] || [ "$WORDS" -gt 170 ]; then
-            echo "::error::Script must contain 70-170 words."
-            cat output/script.txt
+          Write one original YouTube Shorts narration in simple,
+          conversational English.
+
+          The delivery should feel warm, encouraging, natural and personal.
+          Imagine explaining something interesting to a friend, not giving
+          a formal classroom lecture.
+
+          Topic:
+          Choose one useful and interesting topic from Java, DSA,
+          Java 8, Spring Boot, microservices, system design, software
+          engineering careers or practical AI automation.
+
+          Requirements:
+          - Write 100 to 130 words.
+          - Start with a strong curiosity-building hook in the first sentence.
+          - Explain one useful idea clearly.
+          - Use short, natural sentences.
+          - Use contractions where they sound natural.
+          - Include conversational transitions.
+          - Add a small practical example where useful.
+          - End with one memorable takeaway.
+          - Do not write a title, headings, bullet points or stage directions.
+          - Do not include emojis, markdown or special symbols.
+          - Avoid generic introductions such as "Hello everyone".
+          - Do not repeat the same hook or conclusion.
+          - Write original wording. Do not imitate a specific creator.
+          - Output only the narration.
+          PROMPT
+
+          jq -n \
+            --rawfile prompt output/prompt.txt \
+            '{
+              model: "qwen",
+              messages: [
+                {
+                  role: "system",
+                  content: "You write engaging, natural spoken English for short educational videos."
+                },
+                {
+                  role: "user",
+                  content: $prompt
+                }
+              ],
+              temperature: 0.85,
+              top_p: 0.9,
+              max_tokens: 220
+            }' > output/request.json
+
+          curl --fail --silent --show-error \
+            http://127.0.0.1:8080/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d @output/request.json \
+            -o output/response.json
+
+          jq -r '.choices[0].message.content' \
+            output/response.json > output/script.txt
+
+          echo "Generated narration:"
+          cat output/script.txt
+
+          WORD_COUNT=$(wc -w < output/script.txt)
+          echo "Word count: $WORD_COUNT"
+
+          if [ "$WORD_COUNT" -lt 70 ] || [ "$WORD_COUNT" -gt 170 ]; then
+            echo "Narration length is outside the accepted range."
             exit 1
           fi
-          if grep -Eqi \
-            'available commands:|Loading model|JOURNAL ENTRY:|Opening shot:|Closing shot:|Scene description:|Camera direction:|Narration Script|Narrator \(Voice-over\):' \
-            output/script.txt; then
-            echo "::error::Script contains unwanted headings or directions."
-            cat output/script.txt
-            exit 1
-          fi
 
-          echo "Script passed basic validation."
-
+      # ----------------------------------------------------
+      # 5. Install Piper and download a female English voice
+      # ----------------------------------------------------
       - name: Install Piper TTS
-        timeout-minutes: 8
         run: |
           set -euo pipefail
 
           python3 -m venv .venv-tts
-
-          .venv-tts/bin/python -m pip install --upgrade pip
-          .venv-tts/bin/python -m pip install piper-tts
-
-          echo "Piper TTS installed successfully."
-
-      - name: Download Piper voice
-        timeout-minutes: 5
-        run: |
-          set -euo pipefail
+          .venv-tts/bin/pip install --upgrade pip
+          .venv-tts/bin/pip install piper-tts
 
           mkdir -p voices
-          .venv-tts/bin/python -m piper.download_voices \
-            en_US-lessac-medium \
-            --download-dir voices
 
-          test -s voices/en_US-lessac-medium.onnx
-          test -s voices/en_US-lessac-medium.onnx.json
+          curl -L --fail --retry 3 \
+            "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx" \
+            -o voices/en_US-amy-medium.onnx
 
-          echo "Piper voice model downloaded successfully."
+          curl -L --fail --retry 3 \
+            "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json" \
+            -o voices/en_US-amy-medium.onnx.json
 
-      - name: Generate Day 1 voice narration
-        timeout-minutes: 8
-        shell: bash
+          ls -lh voices/
+
+      # ----------------------------------------------------
+      # 6. Generate warm, slower-paced narration
+      # ----------------------------------------------------
+      - name: Generate voice narration
         run: |
           set -euo pipefail
 
-          test -s output/script.txt
           .venv-tts/bin/piper \
-            --model voices/en_US-lessac-medium.onnx \
+            --model voices/en_US-amy-medium.onnx \
             --output_file output/day-001.wav \
+            --length-scale 1.08 \
+            --sentence-silence 0.35 \
             < output/script.txt
 
           test -s output/day-001.wav
 
-          python3 - <<'PY'
-          import wave
-          from pathlib import Path
+          ffprobe -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            output/day-001.wav
 
-          audio = Path("output/day-001.wav")
-          with wave.open(str(audio), "rb") as wav:
-              duration = wav.getnframes() / wav.getframerate()
-              sample_rate = wav.getframerate()
-              channels = wav.getnchannels()
-
-          if duration <= 0:
-              raise SystemExit("ERROR: Generated audio is empty.")
-          print("Voice narration generated successfully.")
-          print(f"Duration: {duration:.1f} seconds")
-          print(f"Sample rate: {sample_rate} Hz")
-          print(f"Channels: {channels}")
-          print(f"File size: {audio.stat().st_size} bytes")
-          PY
-
-      - name: Generate timed captions
+      # ----------------------------------------------------
+      # 7. Create properly positioned ASS subtitles
+      # ----------------------------------------------------
+      - name: Generate ASS captions
         run: |
           set -euo pipefail
 
           python3 - <<'PY'
-          from pathlib import Path
           import re
-          import wave
-          script = Path("output/script.txt").read_text(
-              encoding="utf-8"
-          ).strip()
+          import subprocess
+          from pathlib import Path
 
+          script_path = Path("output/script.txt")
           audio_path = Path("output/day-001.wav")
-          srt_path = Path("output/day-001.srt")
+          ass_path = Path("output/day-001.ass")
 
-          if not script or not audio_path.exists():
-              raise SystemExit("Script or audio file is missing.")
+          text = script_path.read_text(encoding="utf-8").strip()
+          words = re.findall(r"\S+", text)
 
-          with wave.open(str(audio_path), "rb") as audio:
-              duration = audio.getnframes() / audio.getframerate()
+          duration = float(subprocess.check_output([
+              "ffprobe",
+              "-v", "error",
+              "-show_entries", "format=duration",
+              "-of", "default=noprint_wrappers=1:nokey=1",
+              str(audio_path)
+          ], text=True).strip())
 
-          words = re.findall(r"\S+", script)
-          if not words or duration <= 0:
-              raise SystemExit("Invalid script or audio duration.")
+          # Build caption groups with a maximum of two lines.
+          # Each line is kept short enough for mobile viewing.
+          groups = []
+          current = []
+          current_length = 0
 
-          # Divide narration into readable groups of six words.
-          chunks = [
-              words[i:i + 6]
-              for i in range(0, len(words), 6)
-          ]
-          # Estimate caption timing from text length.
-          weights = [
-              sum(len(word) for word in chunk)
-              for chunk in chunks
-          ]
-          total_weight = sum(weights)
-          elapsed = 0.0
-          entries = []
+          for word in words:
+              extra = len(word) + (1 if current else 0)
 
-          def timestamp(seconds):
-              ms = round(seconds * 1000)
-              hours, ms = divmod(ms, 3600000)
-              minutes, ms = divmod(ms, 60000)
-              seconds, ms = divmod(ms, 1000)
+              if current and (
+                  current_length + extra > 30 or len(current) >= 6
+              ):
+                  groups.append(current)
+                  current = []
+                  current_length = 0
+
+              current.append(word)
+              current_length += len(word) + (1 if len(current) > 1 else 0)
+
+          if current:
+              groups.append(current)
+
+          def make_lines(group):
+              lines = []
+              line = ""
+
+              for word in group:
+                  candidate = (line + " " + word).strip()
+
+                  if len(candidate) > 30 and line:
+                      lines.append(line)
+                      line = word
+                  else:
+                      line = candidate
+
+              if line:
+                  lines.append(line)
+
+              return lines[:2]
+
+          def ass_time(seconds):
+              total_cs = round(seconds * 100)
+              hours = total_cs // 360000
+              minutes = (total_cs % 360000) // 6000
+              seconds_part = (total_cs % 6000) // 100
+              centiseconds = total_cs % 100
               return (
-                  f"{hours:02}:{minutes:02}:"
-                  f"{seconds:02},{ms:03}"
+                  f"{hours}:{minutes:02d}:"
+                  f"{seconds_part:02d}.{centiseconds:02d}"
               )
 
-          for index, (chunk, weight) in enumerate(
-              zip(chunks, weights), start=1
-          ):
-              start = elapsed
-              elapsed += duration * weight / total_weight
+          header = """[Script Info]
+          ScriptType: v4.00+
+          PlayResX: 1080
+          PlayResY: 1920
+          WrapStyle: 2
+          ScaledBorderAndShadow: yes
+          YCbCr Matrix: TV.709
 
-              entries.append(
-                  f"{index}\n"
-                  f"{timestamp(start)} --> {timestamp(elapsed)}\n"
-                  f"{' '.join(chunk)}\n"
+          [V4+ Styles]
+          Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+          Style: Default,DejaVu Sans,50,&H00FFFFFF,&H000000FF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,4,1,2,90,90,390,1
+
+          [Events]
+          Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+          """
+
+          # Timing is distributed according to each group's word count.
+          # This is approximate timing, not word-level forced alignment.
+          total_weight = sum(len(group) for group in groups)
+          current_time = 0.0
+          events = []
+
+          for group in groups:
+              group_duration = duration * len(group) / total_weight
+              start = current_time
+              end = current_time + group_duration
+              current_time = end
+
+              caption = r"\N".join(make_lines(group))
+              events.append(
+                  "Dialogue: 0,"
+                  + ass_time(start)
+                  + ","
+                  + ass_time(end)
+                  + ",Default,,0,0,0,,"
+                  + caption
               )
-          srt_path.write_text(
-              "\n".join(entries),
+
+          ass_path.write_text(
+              header + "\n".join(events) + "\n",
               encoding="utf-8"
           )
 
-          print(f"Created {len(chunks)} caption segments.")
-          print(f"Audio duration: {duration:.1f} seconds")
-          print(f"Captions saved to: {srt_path}")
+          print(f"Created {ass_path}")
+          print(f"Audio duration: {duration:.2f} seconds")
+          print(f"Caption groups: {len(groups)}")
+          print("Caption style: centered, two lines maximum, safe margins.")
           PY
 
-          test -s output/day-001.srt
+          echo "ASS subtitle preview:"
+          head -n 18 output/day-001.ass
 
-      - name: Render YouTube Shorts MP4
-        timeout-minutes: 10
+      # ----------------------------------------------------
+      # 8. Render vertical video with FFmpeg
+      # ----------------------------------------------------
+      - name: Render YouTube Short
         run: |
           set -euo pipefail
-          test -s output/script.txt
-          test -s output/day-001.wav
-          test -s output/day-001.srt
+
+          DURATION=$(ffprobe -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            output/day-001.wav)
+
           ffmpeg -y \
             -f lavfi \
-            -i "color=c=0x101827:s=1080x1920:r=30" \
+            -i "color=c=0x101827:s=1080x1920:r=30:d=${DURATION}" \
             -i output/day-001.wav \
             -filter_complex "\
-              [0:v]drawbox=x=0:y=0:w=iw:h=18:color=0x38BDF8:t=fill,\
-              drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:\
-              text='90-DAY SOFTWARE JOURNEY':\
-              fontsize=46:fontcolor=0x38BDF8:\
-              x=(w-text_w)/2:y=210,\
+              [0:v]drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:\
+              text='TECH MADE SIMPLE':\
+              fontcolor=white:fontsize=54:\
+              x=(w-text_w)/2:y=180,\
               drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:\
-              text='DAY 01  |  BUILDING IN PUBLIC':\
-              fontsize=30:fontcolor=white:\
-              x=(w-text_w)/2:y=290,\
-              subtitles=filename='output/day-001.srt':force_style='FontName=DejaVu Sans,FontSize=36,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=250'\
-              [v]" \
+              text='Learn one useful idea every day':\
+              fontcolor=0xB8C7D9:fontsize=30:\
+              x=(w-text_w)/2:y=260,\
+              ass=output/day-001.ass[v]" \
             -map "[v]" \
             -map 1:a \
             -c:v libx264 \
             -preset veryfast \
             -crf 23 \
             -pix_fmt yuv420p \
+            -r 30 \
             -c:a aac \
             -b:a 128k \
             -shortest \
             -movflags +faststart \
             output/day-001.mp4
+
           test -s output/day-001.mp4
 
+      # ----------------------------------------------------
+      # 9. Verify video and create a caption-check frame
+      # ----------------------------------------------------
+      - name: Verify video and caption positioning
+        run: |
+          set -euo pipefail
+
+          echo "Video properties:"
           ffprobe -v error \
-            -show_entries stream=codec_name,width,height \
-            -show_entries format=duration \
+            -select_streams v:0 \
+            -show_entries stream=codec_name,width,height,r_frame_rate \
             -of default=noprint_wrappers=1 \
             output/day-001.mp4
 
-          echo "Day 1 vertical video rendered successfully."
+          echo "Audio properties:"
+          ffprobe -v error \
+            -select_streams a:0 \
+            -show_entries stream=codec_name,sample_rate \
+            -of default=noprint_wrappers=1 \
+            output/day-001.mp4
 
-      - name: Upload script, voice, video, and diagnostics
-        if: always()
+          # Extract a frame to inspect caption placement.
+          ffmpeg -y \
+            -ss 5 \
+            -i output/day-001.mp4 \
+            -frames:v 1 \
+            output/caption-check.png
+
+          echo "Generated video and caption-check frame."
+
+      # ----------------------------------------------------
+      # 10. Upload all generated files
+      # ----------------------------------------------------
+      - name: Upload generated files
         uses: actions/upload-artifact@v4
         with:
-          name: day-001-ai-script
+          name: day-001-ai-short
           path: |
             output/script.txt
             output/day-001.wav
-            output/day-001.srt
+            output/day-001.ass
             output/day-001.mp4
+            output/caption-check.png
             output/llama.log
             output/response.json
-          if-no-files-found: warn
+            output/request.json
+          if-no-files-found: error
           retention-days: 7
