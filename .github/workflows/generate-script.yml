@@ -19,7 +19,6 @@ jobs:
       - name: Install dependencies
         run: |
           set -euo pipefail
-
           sudo apt-get update
           sudo apt-get install -y \
             git cmake build-essential curl python3 python3-venv \
@@ -36,7 +35,6 @@ jobs:
 
           MODEL="models/qwen.gguf"
           MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true"
-
           curl -fL --retry 3 --retry-delay 2 \
             --connect-timeout 30 \
             "$MODEL_URL" -o "$MODEL"
@@ -51,7 +49,6 @@ jobs:
 
           git clone --depth 1 \
             https://github.com/ggml-org/llama.cpp.git llama.cpp
-
           cmake -S llama.cpp -B llama.cpp/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DGGML_NATIVE=OFF \
@@ -63,7 +60,6 @@ jobs:
             -j 2
 
           LLAMA_SERVER="$GITHUB_WORKSPACE/llama.cpp/build/bin/llama-server"
-
           if [ ! -x "$LLAMA_SERVER" ]; then
             echo "::error::llama-server was not produced."
             find llama.cpp/build -type f -name 'llama-server*' -print || true
@@ -81,7 +77,6 @@ jobs:
 
           test -s daily_notes/day-001.md
           mkdir -p output
-
           python3 - <<'PY'
           from pathlib import Path
           import json
@@ -94,7 +89,6 @@ jobs:
           You write natural YouTube Shorts voice-over scripts.
 
           Produce one short spoken narration in simple English.
-
           Requirements:
           - Target 100 to 120 words.
           - Write in first person.
@@ -112,7 +106,6 @@ jobs:
           - Finish with a complete sentence.
           - Return only the narration.
           """
-
           payload = {
               "messages": [
                   {
@@ -132,7 +125,6 @@ jobs:
               "max_tokens": 160,
               "stream": False
           }
-
           Path("output/request.json").write_text(
               json.dumps(payload),
               encoding="utf-8"
@@ -152,7 +144,6 @@ jobs:
 
           SERVER="$LLAMA_SERVER"
           MODEL="models/qwen.gguf"
-
           test -x "$SERVER"
           test -s "$MODEL"
 
@@ -168,7 +159,6 @@ jobs:
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
           READY=0
-
           for i in $(seq 1 90); do
             if curl -fsS \
               http://127.0.0.1:8080/health \
@@ -186,13 +176,11 @@ jobs:
 
             sleep 4
           done
-
           if [ "$READY" -ne 1 ]; then
             echo "::error::llama-server did not become ready."
             cat output/llama.log || true
             exit 1
           fi
-
           if ! curl --fail --silent --show-error \
             --max-time 300 \
             http://127.0.0.1:8080/v1/chat/completions \
@@ -203,7 +191,6 @@ jobs:
             cat output/llama.log || true
             exit 1
           fi
-
           python3 - <<'PY'
           import json
           import re
@@ -219,12 +206,10 @@ jobs:
 
           if not content:
               raise SystemExit("ERROR: Model returned empty narration.")
-
           # Remove common Markdown formatting.
           content = re.sub(r"\*\*(.*?)\*\*", r"\1", content)
           content = re.sub(r"__(.*?)__", r"\1", content)
           content = re.sub(r"(?m)^\s*#{1,6}\s*", "", content)
-
           # Remove a common introductory title if the model adds one.
           content = re.sub(
               r"^(?:Today's Journey Begins|"
@@ -234,7 +219,6 @@ jobs:
               content,
               flags=re.IGNORECASE
           )
-
           # Remove speaker labels and stage directions.
           content = re.sub(
               r"(?im)^\s*Narrator\s*\(Voice[- ]over\)\s*:\s*",
@@ -248,7 +232,6 @@ jobs:
               "",
               content
           )
-
           # Remove Markdown list markers, including inline bullets.
           content = re.sub(
               r"(?<!\S)[-*+]\s+",
@@ -263,7 +246,6 @@ jobs:
 
           words = content.split()
           word_count = len(words)
-
           print("\n--- CLEANED GENERATED SCRIPT ---\n")
           print(content)
           print("\n--- END SCRIPT ---")
@@ -275,7 +257,6 @@ jobs:
                   "Expected 70-170 words. "
                   "Reduce the prompt length or adjust generation."
               )
-
           if content[-1] not in ".!?":
               raise SystemExit(
                   "ERROR: Script appears incomplete because it "
@@ -293,7 +274,6 @@ jobs:
       - name: Validate generated script
         run: |
           set -euo pipefail
-
           test -s output/script.txt
 
           WORDS="$(wc -w < output/script.txt | tr -d ' ')"
@@ -304,7 +284,6 @@ jobs:
             cat output/script.txt
             exit 1
           fi
-
           if grep -Eqi \
             'available commands:|Loading model|JOURNAL ENTRY:|Opening shot:|Closing shot:|Scene description:|Camera direction:|Narration Script|Narrator \(Voice-over\):' \
             output/script.txt; then
@@ -333,7 +312,6 @@ jobs:
           set -euo pipefail
 
           mkdir -p voices
-
           .venv-tts/bin/python -m piper.download_voices \
             en_US-lessac-medium \
             --download-dir voices
@@ -350,7 +328,6 @@ jobs:
           set -euo pipefail
 
           test -s output/script.txt
-
           .venv-tts/bin/piper \
             --model voices/en_US-lessac-medium.onnx \
             --output_file output/day-001.wav \
@@ -363,7 +340,6 @@ jobs:
           from pathlib import Path
 
           audio = Path("output/day-001.wav")
-
           with wave.open(str(audio), "rb") as wav:
               duration = wav.getnframes() / wav.getframerate()
               sample_rate = wav.getframerate()
@@ -371,7 +347,6 @@ jobs:
 
           if duration <= 0:
               raise SystemExit("ERROR: Generated audio is empty.")
-
           print("Voice narration generated successfully.")
           print(f"Duration: {duration:.1f} seconds")
           print(f"Sample rate: {sample_rate} Hz")
@@ -387,7 +362,6 @@ jobs:
           from pathlib import Path
           import re
           import wave
-
           script = Path("output/script.txt").read_text(
               encoding="utf-8"
           ).strip()
@@ -402,7 +376,6 @@ jobs:
               duration = audio.getnframes() / audio.getframerate()
 
           words = re.findall(r"\S+", script)
-
           if not words or duration <= 0:
               raise SystemExit("Invalid script or audio duration.")
 
@@ -411,7 +384,6 @@ jobs:
               words[i:i + 6]
               for i in range(0, len(words), 6)
           ]
-
           # Estimate caption timing from text length.
           weights = [
               sum(len(word) for word in chunk)
@@ -426,7 +398,6 @@ jobs:
               hours, ms = divmod(ms, 3600000)
               minutes, ms = divmod(ms, 60000)
               seconds, ms = divmod(ms, 1000)
-
               return (
                   f"{hours:02}:{minutes:02}:"
                   f"{seconds:02},{ms:03}"
@@ -443,7 +414,6 @@ jobs:
                   f"{timestamp(start)} --> {timestamp(elapsed)}\n"
                   f"{' '.join(chunk)}\n"
               )
-
           srt_path.write_text(
               "\n".join(entries),
               encoding="utf-8"
@@ -460,11 +430,9 @@ jobs:
         timeout-minutes: 10
         run: |
           set -euo pipefail
-
           test -s output/script.txt
           test -s output/day-001.wav
           test -s output/day-001.srt
-
           ffmpeg -y \
             -f lavfi \
             -i "color=c=0x101827:s=1080x1920:r=30" \
@@ -479,11 +447,7 @@ jobs:
               text='DAY 01  |  BUILDING IN PUBLIC':\
               fontsize=30:fontcolor=white:\
               x=(w-text_w)/2:y=290,\
-              subtitles=output/day-001.srt:\
-              force_style='FontName=DejaVu Sans,FontSize=22,\
-              PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,\
-              BorderStyle=1,Outline=3,Shadow=1,\
-              Alignment=2,MarginV=430'\
+              subtitles=filename='output/day-001.srt':force_style='FontName=DejaVu Sans,FontSize=36,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=250'\
               [v]" \
             -map "[v]" \
             -map 1:a \
@@ -496,7 +460,6 @@ jobs:
             -shortest \
             -movflags +faststart \
             output/day-001.mp4
-
           test -s output/day-001.mp4
 
           ffprobe -v error \
